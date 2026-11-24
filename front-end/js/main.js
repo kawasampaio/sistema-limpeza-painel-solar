@@ -1,0 +1,2 @@
+iniciarTempoReal();
+buscarAtivacoes().then(mostrarHistorico);

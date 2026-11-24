@@ -1,0 +1,1221 @@
+﻿# =====================================================================
+#  SISTEMA DE LIMPEZA AUTOMATIZADA DE PAINÉIS FOTOVOLTAICOS (TCC)
+#  Kawa Sampaio Arneiro | Arduino + back-end Python + dashboard web
+# =====================================================================
+#
+#  ESTE ARQUIVO É O PASSO A PASSO E TAMBÉM O INSTALADOR.
+#  Ele recria a pasta do projeto com todo o código, instala as
+#  ferramentas e cria um atalho para abrir o sistema.
+#
+#  ---------------------------------------------------------------
+#  COMO USAR NA OUTRA MÁQUINA (Windows 10/11, com internet)
+#  ---------------------------------------------------------------
+#  1) Copie este arquivo para a Área de Trabalho da outra máquina
+#     (pen drive, e-mail ou Google Drive), com o nome
+#     sistema_tcc_painel_solar.txt
+#  2) Abra o PowerShell (menu Iniciar > digite PowerShell > Enter).
+#  3) Cole o comando abaixo (é uma linha só) e aperte Enter:
+#
+#     cd ([Environment]::GetFolderPath('Desktop')); Copy-Item .\sistema_tcc_painel_solar.txt .\instalar_tcc.ps1 -Force; powershell -ExecutionPolicy Bypass -File .\instalar_tcc.ps1
+#
+#  4) Se ele avisar que instalou o Python: FECHE o PowerShell, abra
+#     outro e rode o mesmo comando do passo 3 de novo.
+#  5) Ligue o Arduino no USB. Quando o instalador perguntar a porta,
+#     digite a que aparecer na lista (ex.: COM3, COM4...).
+#  6) No fim, abra a pasta "arduino_sensor_infravermelho" na Área de
+#     Trabalho e dê dois cliques em INICIAR_SISTEMA.bat.
+#     O navegador abre em http://localhost:8010/
+#
+#  O que é instalado:
+#  - Python 3.13, só se a máquina não tiver Python 3.10 ou mais novo;
+#  - numa pasta .venv dentro do projeto: fastapi 0.159.1, uvicorn 0.54.0,
+#    websockets 17.3 e pyserial 3.5 (as mesmas versões da máquina original);
+#  - uma cópia local do Chart.js (gráficos funcionam sem internet);
+#  - opcional: PlatformIO, só se você escolher gravar o código no Arduino.
+#
+#  ---------------------------------------------------------------
+#  NO DIA DA APRESENTAÇÃO (leia antes)
+#  ---------------------------------------------------------------
+#  - O Arduino guarda o programa. Se ele já foi gravado, NÃO precisa
+#    gravar de novo: é só ligar no USB.
+#  - Ao abrir a porta serial, o Arduino reinicia e CALIBRA. Deixe o
+#    painel LIMPO quando der dois cliques no INICIAR_SISTEMA.bat.
+#  - Feche o Monitor Serial do VS Code/Arduino IDE antes: só um
+#    programa pode usar a porta COM por vez.
+#  - Arduino clone (chip CH340) sem porta COM aparecendo: instale o
+#    driver CH340 antes.
+#  - O dashboard mostra as ativações do MÊS ATUAL. O histórico dos
+#    testes de outubro/2026 fica salvo e aparece em:
+#    http://localhost:8010/api/ativacoes/?mes=2026-10
+#  - Trocou de porta depois? Rode o instalador de novo, ou edite a
+#    linha PORTA = "COM3" em back-end\servidor.py.
+#  - Rodar o servidor sem o instalador:
+#    cd <pasta do projeto>\back-end
+#    ..\.venv\Scripts\python.exe -m uvicorn servidor:app --port 8010
+# =====================================================================
+
+param(
+    [string]$Destino = "",
+    [switch]$Teste
+)
+
+$ErrorActionPreference = 'Continue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Escrever($caminho, $texto) {
+    $dir = Split-Path $caminho -Parent
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    [System.IO.File]::WriteAllText($caminho, $texto, (New-Object System.Text.UTF8Encoding $false))
+}
+
+function Achar-Python {
+    foreach ($cmd in @('python', 'py')) {
+        try {
+            $v = & $cmd --version 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $v -match 'Python 3\.(\d+)') {
+                if ([int]$Matches[1] -ge 10) { return $cmd }
+            }
+        } catch {}
+    }
+    return $null
+}
+
+# ---------------------------------------------------------------
+Write-Host "`n=== 1/6 Verificando o Python ===" -ForegroundColor Cyan
+$PYSYS = Achar-Python
+if (-not $PYSYS) {
+    if ($Teste) { Write-Host 'Python nao encontrado.'; exit 1 }
+    Write-Host 'Python 3.10+ não encontrado. Instalando o Python 3.13 com o winget...' -ForegroundColor Yellow
+    winget install -e --id Python.Python.3.13 --accept-package-agreements --accept-source-agreements
+    Write-Host ''
+    Write-Host 'Terminou? FECHE este PowerShell, abra outro e rode o mesmo comando de novo.' -ForegroundColor Yellow
+    Write-Host 'Sem winget nesta máquina: baixe em https://www.python.org/downloads/ e marque "Add python.exe to PATH".' -ForegroundColor Yellow
+    Read-Host 'Aperte Enter para sair'
+    exit 1
+}
+Write-Host ("Python encontrado: " + (& $PYSYS --version 2>&1))
+
+# ---------------------------------------------------------------
+if (-not $Destino) { $Destino = Join-Path ([Environment]::GetFolderPath('Desktop')) 'arduino_sensor_infravermelho' }
+Write-Host "`n=== 2/6 Criando os arquivos em $Destino ===" -ForegroundColor Cyan
+if (Test-Path (Join-Path $Destino 'back-end\servidor.py')) {
+    Write-Host 'A pasta já existe: os arquivos de código serão sobrescritos (o banco de ativações é mantido).' -ForegroundColor Yellow
+}
+New-Item -ItemType Directory -Path $Destino -Force | Out-Null
+
+# ======================= ARQUIVOS DO PROJETO =======================
+
+# ---------- src\main.cpp ----------
+Escrever (Join-Path $Destino 'src\main.cpp') @'
+#include <Arduino.h>
+
+// =====================================================
+// PINOS
+// =====================================================
+
+// Sensor infravermelho
+const uint8_t SENSOR_PIN = A0;
+
+// Relés
+const uint8_t RELE_BOMBA_1 = 7;  // IN1 / K1
+const uint8_t RELE_BOMBA_2 = 8;  // IN2 / K2
+
+
+// =====================================================
+// CONFIGURAÇÃO DO RELÉ
+// =====================================================
+
+// A maioria dos módulos de relé para Arduino é ACTIVE LOW:
+//
+// LOW  = relé ligado
+// HIGH = relé desligado
+//
+// Se o seu funcionar ao contrário, troque os dois valores.
+
+const uint8_t RELE_LIGADO = LOW;
+const uint8_t RELE_DESLIGADO = HIGH;
+
+
+// =====================================================
+// CONFIGURAÇÃO DO SENSOR
+// =====================================================
+
+// Se aumentar a sujeira fizer a leitura do A0 DIMINUIR:
+// deixe false.
+//
+// Se aumentar a sujeira fizer a leitura do A0 AUMENTAR:
+// coloque true.
+
+const bool SENSOR_INVERTED = false;
+
+
+// =====================================================
+// LIMITE DE SUJIDADE
+// =====================================================
+
+// Painel limpo = 100%
+//
+// O sistema será acionado quando o sinal cair 5%.
+//
+// 100% - 5% = 95%
+
+const float TRIGGER_PERCENT = 95.0;
+
+
+// =====================================================
+// CONFIRMAÇÃO
+// =====================================================
+
+// Número de leituras seguidas abaixo de 95% antes de
+// considerar que realmente existe sujeira.
+
+const uint8_t CONFIRMATION_READS = 8;
+
+
+// =====================================================
+// TEMPOS DAS BOMBAS
+// =====================================================
+
+// Tempo que as bombas ficarão ligadas.
+//
+// 5000 ms = 5 segundos.
+//
+// PARA O PRIMEIRO TESTE:
+// deixe apenas 5 segundos.
+
+const unsigned long TEMPO_BOMBAS = 5000;
+
+
+// Depois da limpeza espera 10 segundos antes
+// de começar uma nova análise.
+
+const unsigned long TEMPO_ESPERA_APOS_LIMPEZA = 10000;
+
+
+// =====================================================
+// LEITURAS
+// =====================================================
+
+const uint16_t CALIBRATION_SAMPLES = 150;
+const uint8_t READ_SAMPLES = 25;
+
+
+// =====================================================
+// VARIÁVEIS
+// =====================================================
+
+float baselineSignal = 0.0;
+
+uint8_t contadorSujeira = 0;
+
+
+// =====================================================
+// FUNÇÃO: MÉDIA DO SENSOR
+// =====================================================
+
+float lerSensorMedia(uint16_t quantidade) {
+
+    unsigned long soma = 0;
+
+    for (uint16_t i = 0; i < quantidade; i++) {
+
+        soma += analogRead(SENSOR_PIN);
+
+        delay(5);
+    }
+
+    return (float)soma / quantidade;
+}
+
+
+// =====================================================
+// FUNÇÃO: CORRIGIR SENTIDO DO SENSOR
+// =====================================================
+
+float converterSinal(float leitura) {
+
+    if (SENSOR_INVERTED) {
+
+        return 1023.0 - leitura;
+    }
+
+    return leitura;
+}
+
+
+// =====================================================
+// FUNÇÃO: DESLIGAR BOMBAS
+// =====================================================
+
+void desligarBombas() {
+
+    digitalWrite(RELE_BOMBA_1, RELE_DESLIGADO);
+
+    digitalWrite(RELE_BOMBA_2, RELE_DESLIGADO);
+}
+
+
+// =====================================================
+// FUNÇÃO: LIGAR BOMBAS
+// =====================================================
+
+void ligarBombas() {
+
+    digitalWrite(RELE_BOMBA_1, RELE_LIGADO);
+
+    digitalWrite(RELE_BOMBA_2, RELE_LIGADO);
+}
+
+
+// =====================================================
+// CICLO DE LIMPEZA
+// =====================================================
+
+void executarLimpeza() {
+
+    Serial.println();
+    Serial.println(F("======================================"));
+    Serial.println(F("SUJIDADE DETECTADA"));
+    Serial.println(F("INICIANDO LIMPEZA"));
+    Serial.println(F("======================================"));
+
+
+    // Liga os dois relés
+    ligarBombas();
+
+
+    Serial.println(F("K1 / BOMBA 1: LIGADA"));
+    Serial.println(F("K2 / BOMBA 2: LIGADA"));
+
+
+    // Mantém as bombas ligadas
+    delay(TEMPO_BOMBAS);
+
+
+    // Desliga
+    desligarBombas();
+
+
+    Serial.println();
+    Serial.println(F("BOMBA 1: DESLIGADA"));
+    Serial.println(F("BOMBA 2: DESLIGADA"));
+
+    Serial.println(F("LIMPEZA FINALIZADA"));
+    Serial.println();
+
+
+    // Espera antes de voltar a medir
+    Serial.println(F("Aguardando estabilizacao do sensor..."));
+
+    delay(TEMPO_ESPERA_APOS_LIMPEZA);
+
+
+    contadorSujeira = 0;
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+    Serial.begin(115200);
+
+
+    // -----------------------------
+    // Sensor
+    // -----------------------------
+
+    pinMode(SENSOR_PIN, INPUT);
+
+
+    // -----------------------------
+    // Relés
+    // -----------------------------
+
+    pinMode(RELE_BOMBA_1, OUTPUT);
+
+    pinMode(RELE_BOMBA_2, OUTPUT);
+
+
+    // IMPORTANTE:
+    // Arduino sempre inicia com as bombas desligadas.
+
+    desligarBombas();
+
+
+    delay(2000);
+
+
+    Serial.println();
+    Serial.println(F("======================================"));
+    Serial.println(F(" SISTEMA DE LIMPEZA DE PAINEL SOLAR"));
+    Serial.println(F("======================================"));
+
+    Serial.println();
+
+    Serial.println(F("Sensor: A0"));
+
+    Serial.println(F("Bomba 1: D7 / K1"));
+
+    Serial.println(F("Bomba 2: D8 / K2"));
+
+    Serial.println();
+
+
+    // =================================================
+    // CALIBRAÇÃO
+    // =================================================
+
+    Serial.println(F("CALIBRANDO SENSOR..."));
+
+    Serial.println(F("Mantenha o sensor apontado para"));
+    Serial.println(F("o painel LIMPO durante a calibracao."));
+
+    Serial.println();
+
+
+    delay(3000);
+
+
+    float leituraInicial = lerSensorMedia(CALIBRATION_SAMPLES);
+
+
+    baselineSignal = converterSinal(leituraInicial);
+
+
+    Serial.println(F("CALIBRACAO CONCLUIDA"));
+
+    Serial.print(F("Leitura A0: "));
+
+    Serial.println(leituraInicial, 1);
+
+
+    Serial.print(F("Referencia: "));
+
+    Serial.print(baselineSignal, 1);
+
+    Serial.println(F(" = 100%"));
+
+
+    Serial.print(F("Limite de limpeza: "));
+
+    Serial.print(TRIGGER_PERCENT);
+
+    Serial.println(F("%"));
+
+
+    Serial.println();
+
+    Serial.println(F("--------------------------------------"));
+
+    Serial.println(F("A0 | Sinal (%) | Queda (%) | Estado"));
+
+    Serial.println(F("--------------------------------------"));
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+    // =================================================
+    // LÊ SENSOR
+    // =================================================
+
+    float leituraBruta = lerSensorMedia(READ_SAMPLES);
+
+
+    float sinal = converterSinal(leituraBruta);
+
+
+    // =================================================
+    // CALCULA PORCENTAGEM
+    // =================================================
+
+    float porcentagem = 100.0;
+
+
+    if (baselineSignal > 0) {
+
+        porcentagem =
+            (sinal / baselineSignal) * 100.0;
+    }
+
+
+    float queda = 100.0 - porcentagem;
+
+
+    if (queda < 0) {
+
+        queda = 0;
+    }
+
+
+    // =================================================
+    // MOSTRA NO SERIAL
+    // =================================================
+
+    Serial.print(leituraBruta, 1);
+
+    Serial.print(F(" | "));
+
+    Serial.print(porcentagem, 1);
+
+    Serial.print(F("% | "));
+
+    Serial.print(queda, 1);
+
+    Serial.print(F("% | "));
+
+
+    // =================================================
+    // VERIFICA SUJEIRA
+    // =================================================
+
+    if (porcentagem <= TRIGGER_PERCENT) {
+
+        contadorSujeira++;
+
+
+        Serial.print(F("SUJEIRA "));
+
+        Serial.print(contadorSujeira);
+
+        Serial.print(F("/"));
+
+        Serial.println(CONFIRMATION_READS);
+
+
+        // =============================================
+        // CONFIRMOU SUJEIRA
+        // =============================================
+
+        if (contadorSujeira >= CONFIRMATION_READS) {
+
+            executarLimpeza();
+        }
+    }
+
+    else {
+
+        contadorSujeira = 0;
+
+        Serial.println(F("NORMAL"));
+    }
+
+
+    delay(250);
+}
+'@
+
+# ---------- platformio.ini ----------
+Escrever (Join-Path $Destino 'platformio.ini') @'
+[env:uno]
+platform = atmelavr
+board = uno
+framework = arduino
+
+monitor_speed = 115200
+'@
+
+# ---------- README.md ----------
+Escrever (Join-Path $Destino 'README.md') @'
+# Sensor infravermelho de sujidade para painel solar
+
+Projeto para Arduino Uno usando VS Code + PlatformIO.
+
+## Critério de acionamento adotado
+
+A versão inicial usava uma queda de 25% do sinal. Esse valor era arbitrário.
+
+Nesta versão, o ponto inicial foi alterado para **5% de queda do sinal óptico**:
+
+- referência com painel limpo = 100%
+- acionamento = 95% ou menos
+- recuperação/desligamento = 98% ou mais
+
+O objetivo é detectar a sujeira antes que a perda de potência se torne grande.
+
+### Fundamentação
+
+**Alkharusi, T.; Alzahrani, M. M.; Pandey, C.; Yildizhan, H.; Markides, C. N. (2024).  
+Experimental investigation of nonuniform PV soiling. Solar Energy, 272, 112493.  
+DOI: 10.1016/j.solener.2024.112493**
+
+O estudo experimental relata aproximadamente **6–7% de deterioração da potência para cada 5% de queda na transmitância**, nas condições estudadas.
+
+Outro trabalho útil:
+
+**Majeed, R.; Waqas, A.; Sami, H.; Ali, M.; Shahzad, N. (2020).  
+Experimental investigation of soiling losses and a novel cost-effective cleaning system for PV modules. Solar Energy, 201, 298–306.  
+DOI: 10.1016/j.solener.2020.03.014**
+
+Nesse experimento, uma densidade de poeira de 4,6 g/m² esteve associada a queda de potência de aproximadamente **16,16% em módulo monocristalino** e **11,54% em policristalino** após um mês.
+
+## Atenção científica importante
+
+O artigo de Alkharusi et al. mede **transmitância óptica** do vidro/módulo.
+
+O sensor conectado ao A0 deste projeto mede uma **resposta infravermelha/reflexiva**.
+
+Por isso, não é correto afirmar automaticamente que:
+
+`5% de queda no infravermelho = exatamente 5% de perda de potência`.
+
+O limite de 95% deve ser tratado como um **ponto inicial de projeto baseado em literatura**.
+
+Para transformar o sensor em um instrumento calibrado, o ideal é fazer um ensaio:
+
+1. medir o A0 com o painel limpo;
+2. medir tensão/corrente/potência do painel nas mesmas condições;
+3. adicionar níveis controlados de poeira;
+4. repetir as duas medições;
+5. montar uma tabela relacionando queda do sensor e queda real de potência;
+6. escolher o valor do A0 correspondente à perda máxima aceitável.
+
+## Ligações
+
+Sensor:
+
+- VCC -> 5V
+- GND -> GND
+- AO -> A0
+
+Saída:
+
+- LED interno = indicação visual
+- D7 = saída para futuro relé/MOSFET
+
+**Não conecte uma bomba diretamente ao pino D7.**
+Use relé ou MOSFET adequado e fonte apropriada para a bomba.
+
+## Parâmetros que podem ser alterados
+
+No `src/main.cpp`:
+
+```cpp
+const float TRIGGER_PERCENT = 95.0;
+const float RELEASE_PERCENT = 98.0;
+```
+
+Exemplos:
+
+- `95.0` = aciona com queda de 5%
+- `90.0` = aciona com queda de 10%
+- `85.0` = aciona com queda de 15%
+- `75.0` = aciona com queda de 25%
+
+## Sentido do sensor
+
+```cpp
+const bool SENSOR_INVERTED = false;
+```
+
+Se mais sujeira fizer a leitura de A0 diminuir, mantenha `false`.
+
+Se mais sujeira fizer a leitura de A0 aumentar, use:
+
+```cpp
+const bool SENSOR_INVERTED = true;
+```
+
+## PlatformIO
+
+`platformio.ini`:
+
+```ini
+[env:uno]
+platform = atmelavr
+board = uno
+framework = arduino
+monitor_speed = 115200
+```
+
+Comandos no VS Code:
+
+- Build: Ctrl+Alt+B
+- Upload: Ctrl+Alt+U
+- Serial Monitor: Ctrl+Alt+S
+- python -m uvicorn servidor:app --port 8010
+'@
+
+# ---------- .gitignore ----------
+Escrever (Join-Path $Destino '.gitignore') @'
+.pio
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+'@
+
+# ---------- .vscode\extensions.json ----------
+Escrever (Join-Path $Destino '.vscode\extensions.json') @'
+{
+    // See http://go.microsoft.com/fwlink/?LinkId=827846
+    // for the documentation about the extensions.json format
+    "recommendations": [
+        "platformio.platformio-ide"
+    ],
+    "unwantedRecommendations": [
+        "ms-vscode.cpptools-extension-pack",
+        "pioarduino.pioarduino-ide"
+    ]
+}
+'@
+
+# ---------- back-end\servidor.py ----------
+Escrever (Join-Path $Destino 'back-end\servidor.py') @'
+import asyncio
+import sqlite3
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import serial
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+PORTA = "COM3"      # porta USB do Arduino (NAO é a 8000)
+BAUD = 115200
+DB = "ativacoes.db"
+PASTA_FRONT = Path(__file__).resolve().parent.parent / "front-end"
+
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+clientes: set[WebSocket] = set()
+diagnostico = {"linhas_recebidas": 0, "ultima_linha": "", "clientes_conectados": 0}
+
+
+def iniciar_banco():
+    with sqlite3.connect(DB) as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS ativacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            inicio TEXT, fim TEXT, duracao_seg INTEGER, queda_max REAL)""")
+
+
+def salvar_ativacao(inicio, fim, queda_max):
+    duracao = round((fim - inicio).total_seconds())
+    with sqlite3.connect(DB) as c:
+        c.execute("INSERT INTO ativacoes (inicio, fim, duracao_seg, queda_max) VALUES (?,?,?,?)",
+                  (inicio.isoformat(), fim.isoformat(), duracao, queda_max))
+
+
+async def transmitir(dados: dict):
+    for ws in list(clientes):
+        try:
+            await ws.send_json(dados)
+        except Exception:
+            clientes.discard(ws)
+
+
+def enviar(loop, dados):
+    asyncio.run_coroutine_threadsafe(transmitir(dados), loop)
+
+
+def ler_serial(loop):
+    inicio_limpeza = None
+    queda_max = 0.0
+    ultima_queda = 0.0
+
+    while True:
+        try:
+            with serial.Serial(PORTA, BAUD, timeout=1) as s:
+                print(f"Conectado ao Arduino em {PORTA}")
+                while True:
+                    linha = s.readline().decode(errors="ignore").strip()
+                    if not linha:
+                        continue
+
+                    print("ARDUINO:", linha)
+                    diagnostico["linhas_recebidas"] += 1
+                    diagnostico["ultima_linha"] = linha
+
+                    if "INICIANDO LIMPEZA" in linha:
+                        inicio_limpeza = datetime.now()
+                        queda_max = ultima_queda
+                        enviar(loop, {"estado": "limpando"})
+                        continue
+
+                    if "LIMPEZA FINALIZADA" in linha and inicio_limpeza:
+                        salvar_ativacao(inicio_limpeza, datetime.now(), queda_max)
+                        inicio_limpeza = None
+                        enviar(loop, {"estado": "aguardando", "ativacao_salva": True})
+                        continue
+
+                    partes = [p.strip() for p in linha.split("|")]
+                    if len(partes) == 4 and partes[1].endswith("%"):
+                        try:
+                            bruto = float(partes[0])
+                            porcentagem = float(partes[1].rstrip("%"))
+                            queda = float(partes[2].rstrip("%"))
+                        except ValueError:
+                            continue
+                        ultima_queda = queda
+                        queda_max = max(queda_max, queda)
+                        estado = "sujeira" if partes[3].startswith("SUJEIRA") else "normal"
+                        enviar(loop, {"bruto": bruto, "porcentagem": porcentagem,
+                                      "queda": queda, "estado": estado})
+        except serial.SerialException as e:
+            print(f"Erro na serial: {e}. Tentando de novo em 3s...")
+            time.sleep(3)
+
+
+@app.on_event("startup")
+async def startup():
+    iniciar_banco()
+    loop = asyncio.get_running_loop()
+    threading.Thread(target=ler_serial, args=(loop,), daemon=True).start()
+
+
+@app.websocket("/ws/sensor/")
+async def ws_sensor(ws: WebSocket):
+    await ws.accept()
+    clientes.add(ws)
+    print("Navegador conectado no WebSocket")
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        clientes.discard(ws)
+
+
+@app.get("/api/ativacoes/")
+def listar_ativacoes(mes: str | None = None):
+    mes = mes or datetime.now().strftime("%Y-%m")
+    with sqlite3.connect(DB) as c:
+        linhas = c.execute(
+            "SELECT inicio, fim, duracao_seg, queda_max FROM ativacoes WHERE inicio LIKE ? ORDER BY inicio DESC",
+            (f"{mes}%",)).fetchall()
+    return [{"inicio": i, "fim": f, "duracao_seg": d, "queda_max": q} for i, f, d, q in linhas]
+
+
+@app.get("/api/status/")
+def status():
+    diagnostico["clientes_conectados"] = len(clientes)
+    return diagnostico
+
+
+# SEMPRE por último: entrega o front-end em http://localhost:8010/
+app.mount("/", StaticFiles(directory=PASTA_FRONT, html=True), name="front")
+'@
+
+# ---------- front-end\index.html ----------
+Escrever (Join-Path $Destino 'front-end\index.html') @'
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Monitor do Painel Solar</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <h1>Monitor de Sujeira do Painel Solar</h1>
+
+  <section class="cards">
+    <div class="card"><span>Status</span><strong id="status">Aguardando...</strong></div>
+    <div class="card"><span>Ativações no mês</span><strong id="total-ativacoes">0</strong></div>
+    <div class="card"><span>Tempo total ativo</span><strong id="tempo-total">0 s</strong></div>
+    <div class="card"><span>Duração média</span><strong id="tempo-medio">0 s</strong></div>
+  </section>
+
+  <section>
+    <h2>Evolução do sinal (tempo real)</h2>
+    <canvas id="grafico-sinal"></canvas>
+  </section>
+
+  <section>
+    <h2>Ativações por dia</h2>
+    <div class="grafico"><canvas id="grafico-mensal"></canvas></div>
+  </section>
+
+  <section>
+    <h2>Resultados do período</h2>
+    <table id="tabela">
+      <thead><tr><th>Início</th><th>Fim</th><th>Duração</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/tempo-real.js"></script>
+  <script src="js/historico.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
+'@
+
+# ---------- front-end\css\style.css ----------
+Escrever (Join-Path $Destino 'front-end\css\style.css') @'
+body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 16px; background: #f4f6f8; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+.card { background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 1px 4px #0002; }
+.card span { display: block; color: #666; font-size: 14px; }
+.card strong { font-size: 22px; }
+#status.ativo { color: #d32f2f; }
+#status.normal { color: #2e7d32; }
+section { background: #fff; padding: 16px; border-radius: 8px; margin-bottom: 20px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px; border-bottom: 1px solid #ddd; text-align: left; }
+.grafico {
+  position: relative;
+  height: 340px;
+  background: #fff;
+  border: 1px solid #ddd;
+  padding: 12px;
+}
+'@
+
+# ---------- front-end\js\config.js ----------
+Escrever (Join-Path $Destino 'front-end\js\config.js') @'
+const BASE = location.protocol === "file:" ? "localhost:8010" : location.host;
+
+const CONFIG = {
+  USAR_SIMULACAO: false,
+  API_URL: `http://${BASE}/api`,
+  WS_URL: `ws://${BASE}/ws/sensor/`,
+  LIMITE: 95,
+  MAX_PONTOS: 60
+};
+'@
+
+# ---------- front-end\js\api.js ----------
+Escrever (Join-Path $Destino 'front-end\js\api.js') @'
+async function buscarAtivacoes() {
+  if (CONFIG.USAR_SIMULACAO) {
+    return Array.from({ length: 12 }, (_, i) => {
+      const inicio = new Date(2026, 9, i * 2 + 1, 10, 0, 0);
+      const duracao = 60 + Math.floor(Math.random() * 240);
+      return { inicio, fim: new Date(inicio.getTime() + duracao * 1000), duracao_seg: duracao };
+    });
+  }
+  const r = await fetch(`${CONFIG.API_URL}/ativacoes/`);
+  const dados = await r.json();
+  return dados.map(a => ({ ...a, inicio: new Date(a.inicio), fim: new Date(a.fim) }));
+}
+'@
+
+# ---------- front-end\js\main.js ----------
+Escrever (Join-Path $Destino 'front-end\js\main.js') @'
+iniciarTempoReal();
+buscarAtivacoes().then(mostrarHistorico);
+'@
+
+# ---------- front-end\js\tempo-real.js ----------
+Escrever (Join-Path $Destino 'front-end\js\tempo-real.js') @'
+const graficoSinal = new Chart(document.getElementById("grafico-sinal"), {
+  type: "line",
+  data: {
+    labels: [],
+    datasets: [
+      { label: "Sinal (%)", data: [], borderColor: "#f5a623", tension: 0.3 },
+      { label: "Limite de limpeza", data: [], borderColor: "#d32f2f", borderDash: [6, 6], pointRadius: 0 }
+    ]
+  },
+  options: { animation: false, scales: { y: { min: 80, max: 105 } } }
+});
+
+const TEXTOS = {
+  normal: ["Normal", "normal"],
+  sujeira: ["Sujeira detectada", "ativo"],
+  limpando: ["LIMPANDO (bombas ligadas)", "ativo"],
+  aguardando: ["Aguardando estabilizar", "normal"]
+};
+
+function mostrarEstado(estado) {
+  const [texto, classe] = TEXTOS[estado] || ["--", ""];
+  const el = document.getElementById("status");
+  el.textContent = texto;
+  el.className = classe;
+}
+
+function receberDado(d) {
+  mostrarEstado(d.estado);
+
+  if (d.porcentagem !== undefined) {
+    const { labels, datasets } = graficoSinal.data;
+    labels.push(new Date().toLocaleTimeString("pt-BR"));
+    datasets[0].data.push(d.porcentagem);
+    datasets[1].data.push(CONFIG.LIMITE);
+    if (labels.length > CONFIG.MAX_PONTOS) {
+      labels.shift();
+      datasets[0].data.shift();
+      datasets[1].data.shift();
+    }
+    graficoSinal.update();
+  }
+
+  // terminou uma limpeza: atualiza cards, tabela e gráfico do mês
+  if (d.ativacao_salva) buscarAtivacoes().then(mostrarHistorico);
+}
+
+function iniciarTempoReal() {
+  const ws = new WebSocket(CONFIG.WS_URL);
+  ws.onopen = () => {
+    document.getElementById("status").textContent = "Conectado, aguardando dados...";
+  };
+  ws.onmessage = (e) => receberDado(JSON.parse(e.data));
+  ws.onerror = () => {
+    document.getElementById("status").textContent = "Sem conexão com o servidor";
+  };
+  ws.onclose = () => setTimeout(iniciarTempoReal, 3000);
+}
+'@
+
+# ---------- front-end\js\historico.js ----------
+Escrever (Join-Path $Destino 'front-end\js\historico.js') @'
+let graficoMensal = null;
+
+function formatarDuracao(seg) {
+  const m = Math.floor(seg / 60), s = seg % 60;
+  return m ? `${m} min ${s} s` : `${s} s`;
+}
+
+// Escreve o número de ativações em cima de cada coluna
+const rotulosNasColunas = {
+  id: "rotulosNasColunas",
+  afterDatasetsDraw(chart) {
+    const { ctx } = chart;
+    const meta = chart.getDatasetMeta(0);
+    ctx.save();
+    ctx.fillStyle = "#333";
+    ctx.font = "bold 13px Arial";
+    ctx.textAlign = "center";
+    meta.data.forEach((barra, i) => {
+      const valor = chart.data.datasets[0].data[i];
+      if (valor > 0) ctx.fillText(valor, barra.x, barra.y - 6);
+    });
+    ctx.restore();
+  }
+};
+
+function mostrarHistorico(ativacoes) {
+  // ----- cards -----
+  const total = ativacoes.reduce((soma, a) => soma + a.duracao_seg, 0);
+  document.getElementById("total-ativacoes").textContent = ativacoes.length;
+  document.getElementById("tempo-total").textContent = formatarDuracao(total);
+  document.getElementById("tempo-medio").textContent =
+    formatarDuracao(ativacoes.length ? Math.round(total / ativacoes.length) : 0);
+
+  // ----- tabela -----
+  document.querySelector("#tabela tbody").innerHTML = ativacoes.map(a => `
+    <tr>
+      <td>${new Date(a.inicio).toLocaleString("pt-BR")}</td>
+      <td>${new Date(a.fim).toLocaleString("pt-BR")}</td>
+      <td>${formatarDuracao(a.duracao_seg)}</td>
+    </tr>`).join("");
+
+  // ----- gráfico: uma coluna por dia do mês -----
+  const hoje = new Date();
+  const diasNoMes = new Date(hoje.getFullYear(), hoje.getMonth() + 1, 0).getDate();
+  const contagem = Array(diasNoMes).fill(0);
+
+  ativacoes.forEach(a => {
+    const d = new Date(a.inicio);
+    if (!isNaN(d)) contagem[d.getDate() - 1]++;
+  });
+
+  const dias = Array.from({ length: diasNoMes }, (_, i) => i + 1);
+  const nomeMes = hoje.toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+
+  if (graficoMensal) {
+    graficoMensal.data.labels = dias;
+    graficoMensal.data.datasets[0].data = contagem;
+    graficoMensal.options.plugins.title.text = `Ativações da limpeza por dia: ${nomeMes}`;
+    graficoMensal.update();
+    return;
+  }
+
+  graficoMensal = new Chart(document.getElementById("grafico-mensal"), {
+    type: "bar",
+    data: {
+      labels: dias,
+      datasets: [{
+        label: "Ativações",
+        data: contagem,
+        backgroundColor: "#ee5348",
+        borderWidth: 0,
+        barPercentage: 0.45,
+        categoryPercentage: 1.0
+      }]
+    },
+    options: {
+      maintainAspectRatio: false,
+      layout: { padding: { top: 20, right: 10 } },
+      plugins: {
+        legend: { display: false },
+        title: {
+          display: true,
+          text: `Ativações da limpeza por dia: ${nomeMes}`,
+          align: "start",
+          color: "#333",
+          font: { size: 18, weight: "normal" },
+          padding: { bottom: 16 }
+        },
+        tooltip: {
+          callbacks: {
+            title: (itens) => `Dia ${itens[0].label}`,
+            label: (item) => `${item.raw} ${item.raw === 1 ? "ativação" : "ativações"}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          title: { display: true, text: "Dia do mês", color: "#555" },
+          grid: { display: false },
+          border: { color: "#bbb" }
+        },
+        y: {
+          beginAtZero: true,
+          title: { display: true, text: "(número de ativações)", color: "#555" },
+          ticks: { stepSize: 1, precision: 0 },
+          grid: { color: "#d9d9d9" },
+          border: { color: "#bbb" }
+        }
+      }
+    },
+    plugins: [rotulosNasColunas]
+  });
+}
+'@
+
+# ---------- back-end\requirements.txt ----------
+Escrever (Join-Path $Destino 'back-end\requirements.txt') @'
+fastapi==0.159.1
+uvicorn==0.54.0
+websockets==17.3
+pyserial==3.5
+'@
+
+# ---------- back-end\recriar_historico.py ----------
+Escrever (Join-Path $Destino 'back-end\recriar_historico.py') @'
+# Recria o banco ativacoes.db com o historico de testes da maquina original.
+import sqlite3
+
+DADOS = [
+    ('2026-10-22T12:09:18.932232', '2026-10-22T12:09:23.937114', 5, 7.9),
+    ('2026-10-22T12:10:44.792149', '2026-10-22T12:10:49.796868', 5, 19.0),
+    ('2026-10-22T12:23:51.613519', '2026-10-22T12:23:56.617942', 5, 8.7),
+    ('2026-10-27T17:10:53.787273', '2026-10-27T17:10:58.792065', 5, 18.6),
+    ('2026-10-27T17:17:56.128370', '2026-10-27T17:18:01.130178', 5, 11.8),
+    ('2026-10-27T17:18:14.166052', '2026-10-27T17:18:19.170973', 5, 30.4),
+    ('2026-10-27T17:18:32.203893', '2026-10-27T17:18:37.208756', 5, 6.8),
+    ('2026-10-27T17:28:19.006025', '2026-10-27T17:28:24.010779', 5, 44.4),
+    ('2026-10-27T17:45:19.573170', '2026-10-27T17:45:24.578036', 5, 30.8),
+    ('2026-10-27T17:45:37.611062', '2026-10-27T17:45:42.615794', 5, 74.3),
+    ('2026-10-27T17:48:20.043754', '2026-10-27T17:48:25.045584', 5, 72.5),
+    ('2026-10-27T17:48:38.081673', '2026-10-27T17:48:43.086378', 5, 73.2),
+    ('2026-10-27T17:49:21.885755', '2026-10-27T17:49:26.890522', 5, 72.7),
+    ('2026-10-27T17:50:56.292023', '2026-10-27T17:51:01.296910', 5, 75.3),
+    ('2026-10-27T17:53:47.974845', '2026-10-27T17:53:52.979585', 5, 78.3),
+    ('2026-10-27T17:54:17.381791', '2026-10-27T17:54:22.386783', 5, 85.2),
+    ('2026-10-27T17:54:38.073456', '2026-10-27T17:54:43.078306', 5, 55.5),
+    ('2026-10-27T17:55:44.913155', '2026-10-27T17:55:49.918102', 5, 93.5),
+    ('2026-10-27T17:56:08.255045', '2026-10-27T17:56:13.260124', 5, 66.8),
+    ('2026-10-27T17:56:26.673509', '2026-10-27T17:56:31.678338', 5, 93.6),
+    ('2026-10-27T18:01:39.534801', '2026-10-27T18:01:44.536582', 5, 79.5),
+    ('2026-10-27T18:03:37.603552', '2026-10-27T18:03:42.609670', 5, 76.1),
+    ('2026-10-27T18:10:14.904289', '2026-10-27T18:10:19.909317', 5, 84.5),
+    ('2026-10-27T18:12:02.711643', '2026-10-27T18:12:07.716654', 5, 79.8),
+    ('2026-10-27T18:13:38.658097', '2026-10-27T18:13:43.663005', 5, 8.8),
+    ('2026-10-27T18:15:34.452252', '2026-10-27T18:15:39.457097', 5, 81.5),
+    ('2026-10-27T18:17:14.873414', '2026-10-27T18:17:19.878537', 5, 70.9),
+    ('2026-10-27T18:19:10.295061', '2026-10-27T18:19:15.296782', 5, 62.7),
+    ('2026-10-27T18:20:07.357820', '2026-10-27T18:20:12.362879', 5, 89.5),
+    ('2026-10-27T18:21:13.139279', '2026-10-27T18:21:18.144432', 5, 76.9),
+    ('2026-10-27T18:21:31.180579', '2026-10-27T18:21:36.182268', 5, 25.7),
+]
+
+with sqlite3.connect("ativacoes.db") as c:
+    c.execute("""CREATE TABLE IF NOT EXISTS ativacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        inicio TEXT, fim TEXT, duracao_seg INTEGER, queda_max REAL)""")
+    c.executemany("INSERT INTO ativacoes (inicio, fim, duracao_seg, queda_max) VALUES (?,?,?,?)", DADOS)
+print(f"Historico recriado: {len(DADOS)} ativacoes de teste.")
+'@
+
+# ---------- INICIAR_SISTEMA.bat ----------
+Escrever (Join-Path $Destino 'INICIAR_SISTEMA.bat') @'
+@echo off
+title Sistema TCC - Painel Solar
+cd /d "%~dp0back-end"
+echo Iniciando o servidor. O navegador abre em http://localhost:8010/
+echo Para encerrar, feche esta janela ou aperte Ctrl+C.
+start "" cmd /c "timeout /t 4 /nobreak >nul & start http://localhost:8010/"
+"%~dp0.venv\Scripts\python.exe" -m uvicorn servidor:app --port 8010
+pause
+'@
+
+Write-Host 'Arquivos do projeto criados.'
+
+# ---------------------------------------------------------------
+Write-Host "`n=== 3/6 Instalando as bibliotecas Python (.venv) ===" -ForegroundColor Cyan
+$VENV = Join-Path $Destino '.venv'
+$PY = Join-Path $VENV 'Scripts\python.exe'
+if (-not (Test-Path $PY)) { & $PYSYS -m venv $VENV }
+& $PY -m pip install --upgrade pip -q --disable-pip-version-check
+& $PY -m pip install -r (Join-Path $Destino 'back-end\requirements.txt') --disable-pip-version-check
+if ($LASTEXITCODE -ne 0) {
+    Write-Host 'Versões fixas falharam neste Python; instalando as versões mais recentes...' -ForegroundColor Yellow
+    & $PY -m pip install fastapi uvicorn websockets pyserial --disable-pip-version-check
+}
+
+# ---------------------------------------------------------------
+Write-Host "`n=== 4/6 Gráficos offline e histórico de testes ===" -ForegroundColor Cyan
+$chart = Join-Path $Destino 'front-end\js\chart.umd.js'
+try {
+    Invoke-WebRequest 'https://cdn.jsdelivr.net/npm/chart.js@4.4.1' -OutFile $chart -UseBasicParsing
+    if ((Get-Item $chart).Length -gt 50000) {
+        $idx = Join-Path $Destino 'front-end\index.html'
+        $h = [System.IO.File]::ReadAllText($idx)
+        Escrever $idx ($h.Replace('https://cdn.jsdelivr.net/npm/chart.js@4.4.1', 'js/chart.umd.js'))
+        Write-Host 'Chart.js salvo localmente: os gráficos funcionam sem internet.'
+    }
+} catch {
+    Write-Host 'Não deu para baixar o Chart.js agora; o dashboard vai usar a internet para os gráficos.' -ForegroundColor Yellow
+}
+$db = Join-Path $Destino 'back-end\ativacoes.db'
+if (-not (Test-Path $db)) {
+    Push-Location (Join-Path $Destino 'back-end'); & $PY recriar_historico.py; Pop-Location
+} else { Write-Host 'Banco ativacoes.db já existe: mantido.' }
+
+# ---------------------------------------------------------------
+Write-Host "`n=== 5/6 Porta do Arduino ===" -ForegroundColor Cyan
+Write-Host 'Portas encontradas (o Arduino costuma aparecer como "USB-SERIAL", "Arduino Uno" ou "CH340"):'
+& $PY -m serial.tools.list_ports -v
+if ($Teste) { $porta = 'COM99' } else {
+    $porta = Read-Host 'Digite a porta do Arduino (ex.: COM3). Só Enter = COM3'
+    if (-not $porta) { $porta = 'COM3' }
+}
+$porta = $porta.Trim().ToUpper()
+$srv = Join-Path $Destino 'back-end\servidor.py'
+$t = [System.IO.File]::ReadAllText($srv)
+Escrever $srv ($t -replace 'PORTA = "COM\d+"', ('PORTA = "' + $porta + '"'))
+Write-Host "Porta configurada: $porta"
+
+# ---------------------------------------------------------------
+Write-Host "`n=== 6/6 Código do Arduino (opcional) ===" -ForegroundColor Cyan
+if (-not $Teste) {
+    $grava = Read-Host 'Gravar o código no Arduino agora? Só precisa se ele estiver sem o programa (s/N)'
+    if ($grava -match '^[sS]') {
+        & $PY -m pip install platformio --disable-pip-version-check
+        Write-Host 'Gravando (na primeira vez o PlatformIO baixa as ferramentas, pode demorar alguns minutos)...'
+        & $PY -m platformio run -d $Destino -t upload --upload-port $porta
+    }
+}
+
+Write-Host "`n=== PRONTO ===" -ForegroundColor Green
+Write-Host "Pasta do projeto: $Destino"
+Write-Host 'Para abrir o sistema: dois cliques em INICIAR_SISTEMA.bat dentro dessa pasta.'
+Write-Host 'O dashboard abre em http://localhost:8010/'
+if (-not $Teste) { Read-Host 'Aperte Enter para fechar' }

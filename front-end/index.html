@@ -1,0 +1,45 @@
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Monitor do Painel Solar</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <h1>Monitor de Sujeira do Painel Solar</h1>
+
+  <section class="cards">
+    <div class="card"><span>Status</span><strong id="status">Aguardando...</strong></div>
+    <div class="card"><span>Ativações no mês</span><strong id="total-ativacoes">0</strong></div>
+    <div class="card"><span>Tempo total ativo</span><strong id="tempo-total">0 s</strong></div>
+    <div class="card"><span>Duração média</span><strong id="tempo-medio">0 s</strong></div>
+  </section>
+
+  <section>
+    <h2>Evolução do sinal (tempo real)</h2>
+    <canvas id="grafico-sinal"></canvas>
+  </section>
+
+  <section>
+    <h2>Ativações por dia</h2>
+    <div class="grafico"><canvas id="grafico-mensal"></canvas></div>
+  </section>
+
+  <section>
+    <h2>Resultados do período</h2>
+    <table id="tabela">
+      <thead><tr><th>Início</th><th>Fim</th><th>Duração</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1"></script>
+  <script src="js/config.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/tempo-real.js"></script>
+  <script src="js/historico.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
